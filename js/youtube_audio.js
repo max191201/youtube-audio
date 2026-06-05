@@ -13,6 +13,7 @@ const MAX_PLAYER_RESPONSE_RETRY_ATTEMPTS = 80;
 const AUDIO_URL_GUARD_INTERVAL_MS = 500;
 const MAX_AUDIO_URL_GUARD_ATTEMPTS = 24;
 const NAVIGATION_AUDIO_DELAY_MS = 3000;
+const NAVIGATION_RELOAD_DELAY_MS = 50;
 let isExtensionEnabled = false;
 let playerScriptURL = '';
 let signatureDecipherOperations = null;
@@ -20,8 +21,10 @@ let playerScriptFetchPromise = null;
 let activeAudioURL = '';
 let audioURLGuardTimer = null;
 let playerResponseAudioTimer = null;
+let navigationReloadTimer = null;
 let audioApplyGeneration = 0;
 let ignoreBackgroundAudioUntil = 0;
+let currentPageVideoId = '';
 const androidPlayerResponsePromises = new Map();
 
 chrome.runtime.sendMessage(ENABLE_MESSAGE, function (response) {
@@ -77,6 +80,43 @@ function getYouTubeVideoId() {
   }
 
   return '';
+}
+
+currentPageVideoId = getYouTubeVideoId();
+
+function shouldReloadForYouTubeNavigation(previousVideoId, nextVideoId) {
+  return !!(previousVideoId && nextVideoId && previousVideoId !== nextVideoId);
+}
+
+function stopNavigationReload() {
+  if (navigationReloadTimer) {
+    clearTimeout(navigationReloadTimer);
+    navigationReloadTimer = null;
+  }
+}
+
+function reloadForYouTubeVideoNavigationIfNeeded() {
+  var nextVideoId = getYouTubeVideoId();
+  if (!nextVideoId) {
+    return false;
+  }
+
+  if (!shouldReloadForYouTubeNavigation(currentPageVideoId, nextVideoId)) {
+    currentPageVideoId = nextVideoId;
+    return false;
+  }
+
+  currentPageVideoId = nextVideoId;
+  resetAudioOnlyState();
+  stopScheduledPlayerResponseAudio();
+  stopNavigationReload();
+
+  navigationReloadTimer = setTimeout(function () {
+    navigationReloadTimer = null;
+    window.location.reload();
+  }, NAVIGATION_RELOAD_DELAY_MS);
+
+  return true;
 }
 
 function getYTCfgValue(name) {
@@ -830,6 +870,11 @@ document.addEventListener('yt-navigate-finish', function () {
   if (!isExtensionEnabled) {
     return;
   }
+
+  if (reloadForYouTubeVideoNavigationIfNeeded()) {
+    return;
+  }
+
   resetAudioOnlyState();
   ignoreBackgroundAudioUntil = Date.now() + NAVIGATION_AUDIO_DELAY_MS;
   schedulePlayerResponseAudio(NAVIGATION_AUDIO_DELAY_MS);
@@ -838,6 +883,7 @@ document.addEventListener('yt-navigate-finish', function () {
 document.addEventListener('yt-navigate-start', function () {
   audioApplyGeneration++;
   stopScheduledPlayerResponseAudio();
+  stopNavigationReload();
   ignoreBackgroundAudioUntil = Date.now() + NAVIGATION_AUDIO_DELAY_MS;
   resetAudioOnlyState();
 });

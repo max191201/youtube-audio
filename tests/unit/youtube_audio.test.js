@@ -11,6 +11,7 @@ describe('Content Script (youtube_audio.js)', () => {
   let getYouTubeVideoId;
   let selectAudioURLFromPlayerResponse;
   let selectAudioURLForCurrentPage;
+  let shouldReloadForYouTubeNavigation;
   let decipherSignature;
 
   beforeEach(() => {
@@ -45,6 +46,10 @@ describe('Content Script (youtube_audio.js)', () => {
       }
 
       return '';
+    };
+
+    shouldReloadForYouTubeNavigation = function (previousVideoId, nextVideoId) {
+      return !!(previousVideoId && nextVideoId && previousVideoId !== nextVideoId);
     };
 
     const removeURLParameters = function (url, parameters) {
@@ -559,6 +564,15 @@ describe('Content Script (youtube_audio.js)', () => {
       };
 
       await expect(selectAudioURLFromPlayerResponse(playerResponse)).resolves.toBe('');
+    });
+  });
+
+  describe('YouTube navigation handling', () => {
+    it('should reload only when navigating between two different videos', () => {
+      expect(shouldReloadForYouTubeNavigation('first-video', 'second-video')).toBe(true);
+      expect(shouldReloadForYouTubeNavigation('same-video', 'same-video')).toBe(false);
+      expect(shouldReloadForYouTubeNavigation('', 'first-video')).toBe(false);
+      expect(shouldReloadForYouTubeNavigation('first-video', '')).toBe(false);
     });
   });
 
