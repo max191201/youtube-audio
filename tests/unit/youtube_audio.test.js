@@ -363,9 +363,6 @@ describe('Content Script (youtube_audio.js)', () => {
         return;
       }
 
-      videoElement.onloadeddata = function () {
-        makeSetAudioURL(videoElement, url);
-      };
       activeAudioURL = url;
       makeSetAudioURL(videoElement, url);
       startAudioURLGuard(url);
@@ -674,6 +671,16 @@ describe('Content Script (youtube_audio.js)', () => {
       jest.advanceTimersByTime(500);
 
       expect(video.src).toContain('mime=audio');
+    });
+
+    it('should not overwrite YouTube video loadeddata handlers', () => {
+      const video = document.querySelector('video');
+      const existingLoadedDataHandler = jest.fn();
+      video.onloadeddata = existingLoadedDataHandler;
+
+      handleAudioMessage({ url: 'https://youtube.com/videoplayback?mime=audio' });
+
+      expect(video.onloadeddata).toBe(existingLoadedDataHandler);
     });
   });
 

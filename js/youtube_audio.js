@@ -12,6 +12,7 @@ const PLAYER_RESPONSE_RETRY_DELAY_MS = 500;
 const MAX_PLAYER_RESPONSE_RETRY_ATTEMPTS = 80;
 const AUDIO_URL_GUARD_INTERVAL_MS = 500;
 const MAX_AUDIO_URL_GUARD_ATTEMPTS = 24;
+const INITIAL_AUDIO_DELAY_MS = 3000;
 const NAVIGATION_AUDIO_DELAY_MS = 3000;
 const NAVIGATION_RELOAD_DELAY_MS = 50;
 let isExtensionEnabled = false;
@@ -35,7 +36,7 @@ chrome.runtime.sendMessage(ENABLE_MESSAGE, function (response) {
   isExtensionEnabled = !!response && response.enabled === true;
 
   if (isExtensionEnabled) {
-    schedulePlayerResponseAudio(0);
+    schedulePlayerResponseAudio(INITIAL_AUDIO_DELAY_MS);
   }
 });
 
@@ -1007,9 +1008,6 @@ function handleAudioMessage(request, attempt) {
     return;
   }
 
-  videoElement.onloadeddata = function () {
-    makeSetAudioURL(videoElement, url);
-  };
   activeAudioURL = url;
   makeSetAudioURL(videoElement, url);
   startAudioURLGuard(url);
