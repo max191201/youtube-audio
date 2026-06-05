@@ -5,10 +5,222 @@
 
 describe('Content Script (youtube_audio.js)', () => {
   let makeSetAudioURL;
+  let handleAudioMessage;
+  let extractJSONObjectAfterMarker;
+  let getYouTubeVideoId;
+  let selectAudioURLFromPlayerResponse;
+  let decipherSignature;
 
   beforeEach(() => {
     document.body.innerHTML = '';
     jest.clearAllMocks();
+    jest.useRealTimers();
+
+    const audioUrlParametersToRemove = ['range', 'rn', 'rbuf', 'ump'];
+    const audioItags = ['251', '140', '250', '249', '141', '139', '600', '599'];
+
+    getYouTubeVideoId = function (urlValue) {
+      try {
+        const url = new URL(urlValue);
+        const watchVideoId = url.searchParams.get('v');
+        if (watchVideoId) {
+          return watchVideoId;
+        }
+
+        const shortMatch = url.pathname.match(/^\/shorts\/([^/?#]+)/);
+        if (shortMatch) {
+          return shortMatch[1];
+        }
+
+        const embedMatch = url.pathname.match(/^\/embed\/([^/?#]+)/);
+        if (embedMatch) {
+          return embedMatch[1];
+        }
+      } catch (_error) {
+        return '';
+      }
+
+      return '';
+    };
+
+    const removeURLParameters = function (url, parameters) {
+      parameters.forEach(function (parameter) {
+        const urlparts = url.split('?');
+        if (urlparts.length >= 2) {
+          const prefix = encodeURIComponent(parameter) + '=';
+          const pars = urlparts[1].split(/[&;]/g);
+
+          for (let i = pars.length; i-- > 0; ) {
+            if (pars[i].lastIndexOf(prefix, 0) !== -1) {
+              pars.splice(i, 1);
+            }
+          }
+
+          url = urlparts[0] + '?' + pars.join('&');
+        }
+      });
+      return url;
+    };
+
+    extractJSONObjectAfterMarker = function (scriptText, marker) {
+      const markerIndex = scriptText.indexOf(marker);
+      if (markerIndex === -1) {
+        return '';
+      }
+
+      const startIndex = scriptText.indexOf('{', markerIndex);
+      if (startIndex === -1) {
+        return '';
+      }
+
+      let depth = 0;
+      let inString = false;
+      let escaped = false;
+
+      for (let i = startIndex; i < scriptText.length; i++) {
+        const character = scriptText[i];
+
+        if (inString) {
+          if (escaped) {
+            escaped = false;
+          } else if (character === '\\') {
+            escaped = true;
+          } else if (character === '"') {
+            inString = false;
+          }
+          continue;
+        }
+
+        if (character === '"') {
+          inString = true;
+        } else if (character === '{') {
+          depth++;
+        } else if (character === '}') {
+          depth--;
+          if (depth === 0) {
+            return scriptText.slice(startIndex, i + 1);
+          }
+        }
+      }
+
+      return '';
+    };
+
+    const isAudioFormat = function (format) {
+      const mimeType = format.mimeType || '';
+      const itag = String(format.itag || '');
+
+      return (
+        mimeType.indexOf('audio/') === 0 || !!format.audioQuality || audioItags.indexOf(itag) !== -1
+      );
+    };
+
+    const getFormatRank = function (format) {
+      const itag = String(format.itag || '');
+      const priorityIndex = audioItags.indexOf(itag);
+      if (priorityIndex !== -1) {
+        return priorityIndex;
+      }
+
+      return audioItags.length;
+    };
+
+    decipherSignature = function (signature, operations) {
+      let characters = signature.split('');
+
+      for (let i = 0; i < operations.length; i++) {
+        const operation = operations[i];
+        if (operation.type === 'reverse') {
+          characters.reverse();
+        } else if (operation.type === 'splice') {
+          characters.splice(0, operation.argument);
+        } else if (operation.type === 'slice') {
+          characters = characters.slice(operation.argument);
+        } else if (operation.type === 'swap') {
+          const index = operation.argument % characters.length;
+          const first = characters[0];
+          characters[0] = characters[index];
+          characters[index] = first;
+        }
+      }
+
+      return characters.join('');
+    };
+
+    const getAudioFormatURL = function (format, operations) {
+      if (format.url) {
+        return removeURLParameters(format.url, audioUrlParametersToRemove);
+      }
+
+      const cipher = format.signatureCipher || format.cipher;
+      if (!cipher || !operations) {
+        return '';
+      }
+
+      const cipherParameters = new URLSearchParams(cipher);
+      let url = cipherParameters.get('url');
+      if (!url) {
+        return '';
+      }
+
+      let signature = cipherParameters.get('sig') || cipherParameters.get('signature');
+      const encryptedSignature = cipherParameters.get('s');
+      const signatureParameterName = cipherParameters.get('sp') || 'signature';
+
+      if (!signature && encryptedSignature) {
+        signature = decipherSignature(encryptedSignature, operations);
+      }
+
+      if (signature) {
+        const separator = url.indexOf('?') === -1 ? '?' : '&';
+        url =
+          url +
+          separator +
+          encodeURIComponent(signatureParameterName) +
+          '=' +
+          encodeURIComponent(signature);
+      }
+
+      return removeURLParameters(url, audioUrlParametersToRemove);
+    };
+
+    const sortAudioFormats = function (left, right) {
+      const rankDifference = getFormatRank(left) - getFormatRank(right);
+      if (rankDifference !== 0) {
+        return rankDifference;
+      }
+
+      return (right.audioBitrate || 0) - (left.audioBitrate || 0);
+    };
+
+    selectAudioURLFromPlayerResponse = function (playerResponse, operations) {
+      const streamingData = playerResponse && playerResponse.streamingData;
+      const adaptiveFormats = streamingData && streamingData.adaptiveFormats;
+      if (!adaptiveFormats || adaptiveFormats.length === 0) {
+        return Promise.resolve('');
+      }
+
+      const audioFormats = adaptiveFormats.filter(isAudioFormat);
+      const directAudioFormats = audioFormats.filter(function (format) {
+        return !!format.url;
+      });
+
+      if (directAudioFormats.length > 0) {
+        directAudioFormats.sort(sortAudioFormats);
+        return Promise.resolve(getAudioFormatURL(directAudioFormats[0], null));
+      }
+
+      const cipherAudioFormats = audioFormats.filter(function (format) {
+        return !!(format.signatureCipher || format.cipher);
+      });
+
+      if (cipherAudioFormats.length === 0 || !operations) {
+        return Promise.resolve('');
+      }
+
+      cipherAudioFormats.sort(sortAudioFormats);
+      return Promise.resolve(getAudioFormatURL(cipherAudioFormats[0], operations));
+    };
 
     // Define the function as it is in youtube_audio.js
     makeSetAudioURL = function (videoElement, url) {
@@ -18,6 +230,77 @@ describe('Content Script (youtube_audio.js)', () => {
         if (paused === false) {
           videoElement.play();
         }
+      }
+    };
+
+    const findVideoElement = function () {
+      return (
+        document.querySelector('video.html5-main-video') ||
+        document.getElementsByTagName('video')[0]
+      );
+    };
+
+    const removeAudioOnlyNotifications = function () {
+      const audioOnlyDivs = document.getElementsByClassName('audio_only_div');
+      for (let i = audioOnlyDivs.length - 1; i >= 0; i--) {
+        const div = audioOnlyDivs[i];
+        div.parentNode.removeChild(div);
+      }
+    };
+
+    const appendAudioOnlyNotification = function (videoElement) {
+      let parent = videoElement.closest('#movie_player');
+      if (!parent && videoElement.parentNode) {
+        parent = videoElement.parentNode.parentNode || videoElement.parentNode;
+      }
+
+      if (!parent || parent.getElementsByClassName('audio_only_div').length > 0) {
+        return;
+      }
+
+      const extensionAlert = document.createElement('div');
+      extensionAlert.className = 'audio_only_div';
+
+      const alertText = document.createElement('p');
+      alertText.className = 'alert_text';
+      alertText.innerHTML = 'Youtube Audio Extension is running.';
+      extensionAlert.appendChild(alertText);
+
+      chrome.storage.local.get('disable_video_text', function (values) {
+        const disableVideoText = values.disable_video_text ? true : false;
+        if (!disableVideoText && parent.getElementsByClassName('audio_only_div').length == 0) {
+          parent.appendChild(extensionAlert);
+        }
+      });
+    };
+
+    handleAudioMessage = function (request, attempt) {
+      attempt = attempt || 0;
+      const url = request.url;
+
+      if (url == '') {
+        removeAudioOnlyNotifications();
+        return;
+      }
+
+      const videoElement = findVideoElement();
+      if (!videoElement) {
+        if (attempt < 12) {
+          setTimeout(function () {
+            handleAudioMessage(request, attempt + 1);
+          }, 250);
+        }
+        return;
+      }
+
+      videoElement.onloadeddata = function () {
+        makeSetAudioURL(videoElement, url);
+      };
+      makeSetAudioURL(videoElement, url);
+
+      const audioOnlyDivs = document.getElementsByClassName('audio_only_div');
+      if (audioOnlyDivs.length == 0 && url.includes('mime=audio')) {
+        appendAudioOnlyNotification(videoElement);
       }
     };
   });
@@ -76,6 +359,97 @@ describe('Content Script (youtube_audio.js)', () => {
       chrome.runtime.sendMessage('enable-youtube-audio');
 
       expect(chrome.runtime.sendMessage).toHaveBeenCalledWith('enable-youtube-audio');
+    });
+  });
+
+  describe('Player response audio fallback', () => {
+    it('should read video ids from watch, shorts, and embed URLs', () => {
+      expect(getYouTubeVideoId('https://www.youtube.com/watch?v=dQw4w9WgXcQ')).toBe('dQw4w9WgXcQ');
+      expect(getYouTubeVideoId('https://www.youtube.com/shorts/abc123?feature=share')).toBe(
+        'abc123'
+      );
+      expect(getYouTubeVideoId('https://www.youtube.com/embed/xyz789')).toBe('xyz789');
+    });
+
+    it('should extract the initial player response JSON from a script', () => {
+      const scriptText =
+        'window.ytInitialPlayerResponse = {"streamingData":{"adaptiveFormats":[]},' +
+        '"videoDetails":{"title":"brace } inside string"}}; window.next = true;';
+
+      const jsonText = extractJSONObjectAfterMarker(scriptText, 'ytInitialPlayerResponse');
+
+      expect(JSON.parse(jsonText).videoDetails.title).toBe('brace } inside string');
+    });
+
+    it('should select and clean the preferred direct audio URL', async () => {
+      const playerResponse = {
+        streamingData: {
+          adaptiveFormats: [
+            {
+              itag: 18,
+              mimeType: 'video/mp4',
+              url: 'https://video.example/videoplayback?itag=18&range=0-1',
+            },
+            {
+              itag: 140,
+              mimeType: 'audio/mp4',
+              audioBitrate: 128,
+              url: 'https://audio.example/videoplayback?itag=140&mime=audio%2Fmp4&range=0-1&ump=1',
+            },
+            {
+              itag: 251,
+              mimeType: 'audio/webm',
+              audioBitrate: 160,
+              url: 'https://audio.example/videoplayback?itag=251&mime=audio%2Fwebm&rn=1&rbuf=2',
+            },
+          ],
+        },
+      };
+
+      await expect(selectAudioURLFromPlayerResponse(playerResponse)).resolves.toBe(
+        'https://audio.example/videoplayback?itag=251&mime=audio%2Fwebm'
+      );
+    });
+
+    it('should decipher cipher-only audio formats when operations are available', async () => {
+      const playerResponse = {
+        streamingData: {
+          adaptiveFormats: [
+            {
+              itag: 251,
+              mimeType: 'audio/webm',
+              signatureCipher:
+                'url=https%3A%2F%2Faudio.example%2Fvideoplayback%3Fitag%3D251%26range%3D0-1' +
+                '&sp=sig&s=abcdef',
+            },
+          ],
+        },
+      };
+      const operations = [
+        { type: 'reverse', argument: 0 },
+        { type: 'swap', argument: 2 },
+        { type: 'splice', argument: 1 },
+      ];
+
+      await expect(selectAudioURLFromPlayerResponse(playerResponse, operations)).resolves.toBe(
+        'https://audio.example/videoplayback?itag=251&sig=efcba'
+      );
+    });
+
+    it('should return an empty URL for cipher-only formats when operations are unavailable', async () => {
+      const playerResponse = {
+        streamingData: {
+          adaptiveFormats: [
+            {
+              itag: 251,
+              mimeType: 'audio/webm',
+              signatureCipher: 'url=https%3A%2F%2Faudio.example%2Fvideoplayback&s=abc',
+            },
+          ],
+        },
+      };
+
+      await expect(selectAudioURLFromPlayerResponse(playerResponse)).resolves.toBe('');
     });
   });
 
@@ -144,6 +518,39 @@ describe('Content Script (youtube_audio.js)', () => {
       // Should still be only one
       divs = document.getElementsByClassName('audio_only_div');
       expect(divs.length).toBe(1);
+    });
+
+    it('should not duplicate notification when repeated audio messages arrive', () => {
+      const video = document.querySelector('video');
+
+      handleAudioMessage({ url: 'https://youtube.com/videoplayback?mime=audio' });
+      handleAudioMessage({ url: 'https://youtube.com/videoplayback?mime=audio' });
+
+      expect(video.src).toContain('mime=audio');
+      expect(document.getElementsByClassName('audio_only_div')).toHaveLength(1);
+    });
+
+    it('should remove notification when empty URL message arrives', () => {
+      const extensionAlert = document.createElement('div');
+      extensionAlert.className = 'audio_only_div';
+      document.body.appendChild(extensionAlert);
+
+      handleAudioMessage({ url: '' });
+
+      expect(document.getElementsByClassName('audio_only_div')).toHaveLength(0);
+    });
+  });
+
+  describe('Missing video handling', () => {
+    it('should not throw when audio message arrives before video element exists', () => {
+      jest.useFakeTimers();
+      document.body.innerHTML = '<div id="movie_player"></div>';
+
+      expect(() => {
+        handleAudioMessage({ url: 'https://youtube.com/videoplayback?mime=audio' });
+      }).not.toThrow();
+
+      expect(jest.getTimerCount()).toBe(1);
     });
   });
 

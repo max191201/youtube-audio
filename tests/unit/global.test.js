@@ -12,6 +12,8 @@ describe('Background Script (global.js)', () => {
   let disableExtension;
   let saveSettings;
   let tabIds;
+  let audioUrlParametersToRemove;
+  let audioItags;
 
   beforeEach(() => {
     // Reset the DOM and mocks
@@ -20,8 +22,47 @@ describe('Background Script (global.js)', () => {
 
     // Create fresh tabIds set
     tabIds = new Set();
+    audioUrlParametersToRemove = ['range', 'rn', 'rbuf', 'ump'];
+    audioItags = new Set(['139', '140', '141', '249', '250', '251', '599', '600']);
 
     // Define the functions as they are in global.js
+    const getURLParameters = function (url) {
+      try {
+        return new URL(url).searchParams;
+      } catch (_error) {
+        const queryIndex = url.indexOf('?');
+        if (queryIndex === -1) {
+          return new URLSearchParams();
+        }
+
+        return new URLSearchParams(url.slice(queryIndex + 1));
+      }
+    };
+
+    const getDecodedParameter = function (parameters, name) {
+      const value = parameters.get(name);
+      if (!value) {
+        return '';
+      }
+
+      try {
+        return decodeURIComponent(value);
+      } catch (_error) {
+        return value;
+      }
+    };
+
+    const isLiveRequest = function (parameters) {
+      return parameters.get('live') === '1';
+    };
+
+    const isAudioMediaRequest = function (parameters) {
+      const mime = getDecodedParameter(parameters, 'mime');
+      const itag = parameters.get('itag');
+
+      return mime.indexOf('audio') === 0 || audioItags.has(itag);
+    };
+
     removeURLParameters = function (url, parameters) {
       parameters.forEach(function (parameter) {
         const urlparts = url.split('?');
@@ -53,15 +94,22 @@ describe('Background Script (global.js)', () => {
     };
 
     processRequest = function (details) {
-      if (!tabIds.has(details.tabId)) {
+      const parameters = getURLParameters(details.url);
+
+      if (!isAudioMediaRequest(parameters) || isLiveRequest(parameters)) {
         return;
       }
 
-      if (details.url.indexOf('mime=audio') !== -1 && !details.url.includes('live=1')) {
-        const parametersToBeRemoved = ['range', 'rn', 'rbuf'];
-        const audioURL = removeURLParameters(details.url, parametersToBeRemoved);
-        chrome.tabs.sendMessage(details.tabId, { url: audioURL });
+      if (details.tabId < 0) {
+        return;
       }
+
+      const audioURL = removeURLParameters(details.url, audioUrlParametersToRemove);
+      chrome.tabs.sendMessage(details.tabId, { url: audioURL }, function () {
+        if (chrome.runtime.lastError) {
+          return;
+        }
+      });
     };
 
     enableExtension = function () {
@@ -110,8 +158,8 @@ describe('Background Script (global.js)', () => {
     });
 
     it('should remove all specified parameters', () => {
-      const url = 'https://example.com/video?range=0-1000&rn=1&rbuf=500&mime=audio';
-      const result = removeURLParameters(url, ['range', 'rn', 'rbuf']);
+      const url = 'https://example.com/video?range=0-1000&rn=1&rbuf=500&ump=1&mime=audio';
+      const result = removeURLParameters(url, ['range', 'rn', 'rbuf', 'ump']);
       expect(result).toBe('https://example.com/video?mime=audio');
     });
 
@@ -172,19 +220,91 @@ describe('Background Script (global.js)', () => {
     it('should process audio URL and send message to tab', () => {
       const details = {
         tabId: 1,
-        url: 'https://youtube.com/video?mime=audio&range=0-1000&rn=1&rbuf=500',
+        url: 'https://youtube.com/video?mime=audio&range=0-1000&rn=1&rbuf=500&ump=1',
       };
 
       processRequest(details);
 
-      expect(chrome.tabs.sendMessage).toHaveBeenCalledWith(1, {
-        url: 'https://youtube.com/video?mime=audio',
-      });
+      expect(chrome.tabs.sendMessage).toHaveBeenCalledWith(
+        1,
+        {
+          url: 'https://youtube.com/video?mime=audio',
+        },
+        expect.any(Function)
+      );
     });
 
-    it('should ignore requests from tabs not in tabIds', () => {
+    it('should remove ump from audio URL before sending', () => {
+      const details = {
+        tabId: 1,
+        url: 'https://youtube.com/videoplayback?mime=audio&ump=1&other=value',
+      };
+
+      processRequest(details);
+
+      expect(chrome.tabs.sendMessage).toHaveBeenCalledWith(
+        1,
+        {
+          url: 'https://youtube.com/videoplayback?mime=audio&other=value',
+        },
+        expect.any(Function)
+      );
+    });
+
+    it('should process audio URLs with encoded mime values', () => {
+      const details = {
+        tabId: 1,
+        url: 'https://rr.googlevideo.com/videoplayback?mime=audio%2Fwebm&itag=251&range=0-1000',
+      };
+
+      processRequest(details);
+
+      expect(chrome.tabs.sendMessage).toHaveBeenCalledWith(
+        1,
+        {
+          url: 'https://rr.googlevideo.com/videoplayback?mime=audio%2Fwebm&itag=251',
+        },
+        expect.any(Function)
+      );
+    });
+
+    it('should process audio URLs detected by audio-only itag', () => {
+      const details = {
+        tabId: 1,
+        url: 'https://rr.googlevideo.com/videoplayback?itag=140&range=0-1000',
+      };
+
+      processRequest(details);
+
+      expect(chrome.tabs.sendMessage).toHaveBeenCalledWith(
+        1,
+        {
+          url: 'https://rr.googlevideo.com/videoplayback?itag=140',
+        },
+        expect.any(Function)
+      );
+    });
+
+    it('should send audio URL even if tab registration has not completed yet', () => {
       const details = {
         tabId: 999,
+        url: 'https://youtube.com/video?mime=audio',
+      };
+
+      processRequest(details);
+
+      expect(chrome.tabs.sendMessage).toHaveBeenCalledWith(
+        999,
+        {
+          url: 'https://youtube.com/video?mime=audio',
+        },
+        expect.any(Function)
+      );
+    });
+
+    it('should ignore audio requests without a tab id', () => {
+      const details = {
+        tabId: -1,
         url: 'https://youtube.com/video?mime=audio',
       };
 
@@ -196,7 +316,7 @@ describe('Background Script (global.js)', () => {
     it('should ignore non-audio URLs', () => {
       const details = {
         tabId: 1,
-        url: 'https://youtube.com/video?mime=video',
+        url: 'https://youtube.com/video?mime=video&itag=137',
       };
 
       processRequest(details);

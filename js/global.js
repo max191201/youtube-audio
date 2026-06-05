@@ -1,4 +1,45 @@
 const tabIds = new Set();
+const AUDIO_URL_PARAMETERS_TO_REMOVE = ['range', 'rn', 'rbuf', 'ump'];
+const ENABLE_MESSAGE = 'enable-youtube-audio';
+const AUDIO_ITAGS = new Set(['139', '140', '141', '249', '250', '251', '599', '600']);
+let isExtensionEnabled;
+
+function getURLParameters(url) {
+  try {
+    return new URL(url).searchParams;
+  } catch (_error) {
+    var queryIndex = url.indexOf('?');
+    if (queryIndex === -1) {
+      return new URLSearchParams();
+    }
+
+    return new URLSearchParams(url.slice(queryIndex + 1));
+  }
+}
+
+function getDecodedParameter(parameters, name) {
+  var value = parameters.get(name);
+  if (!value) {
+    return '';
+  }
+
+  try {
+    return decodeURIComponent(value);
+  } catch (_error) {
+    return value;
+  }
+}
+
+function isLiveRequest(parameters) {
+  return parameters.get('live') === '1';
+}
+
+function isAudioMediaRequest(parameters) {
+  var mime = getDecodedParameter(parameters, 'mime');
+  var itag = parameters.get('itag');
+
+  return mime.indexOf('audio') === 0 || AUDIO_ITAGS.has(itag);
+}
 
 function removeURLParameters(url, parameters) {
   parameters.forEach(function (parameter) {
@@ -31,18 +72,22 @@ function reloadTab() {
 }
 
 function processRequest(details) {
-  if (!tabIds.has(details.tabId)) {
+  var parameters = getURLParameters(details.url);
+
+  if (!isAudioMediaRequest(parameters) || isLiveRequest(parameters) || details.tabId < 0) {
     return;
   }
 
-  if (details.url.indexOf('mime=audio') !== -1 && !details.url.includes('live=1')) {
-    var parametersToBeRemoved = ['range', 'rn', 'rbuf'];
-    var audioURL = removeURLParameters(details.url, parametersToBeRemoved);
-    chrome.tabs.sendMessage(details.tabId, { url: audioURL });
-  }
+  var audioURL = removeURLParameters(details.url, AUDIO_URL_PARAMETERS_TO_REMOVE);
+  chrome.tabs.sendMessage(details.tabId, { url: audioURL }, function () {
+    if (chrome.runtime.lastError) {
+      return;
+    }
+  });
 }
 
 function enableExtension() {
+  isExtensionEnabled = true;
   chrome.browserAction.setIcon({
     path: {
       128: 'img/icon128.png',
@@ -55,6 +100,7 @@ function enableExtension() {
 }
 
 function disableExtension() {
+  isExtensionEnabled = false;
   chrome.browserAction.setIcon({
     path: {
       38: 'img/disabled_icon38.png',
@@ -97,8 +143,38 @@ chrome.storage.local.get('youtube_audio_state', function (values) {
   }
 });
 
-chrome.runtime.onMessage.addListener(function (message, sender) {
+function getCurrentExtensionState(callback) {
+  if (typeof isExtensionEnabled !== 'undefined') {
+    callback(isExtensionEnabled);
+    return;
+  }
+
+  chrome.storage.local.get('youtube_audio_state', function (values) {
+    var currentState = values.youtube_audio_state;
+    if (typeof currentState === 'undefined') {
+      currentState = true;
+    }
+
+    callback(currentState);
+  });
+}
+
+chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
+  if (message !== ENABLE_MESSAGE) {
+    return;
+  }
+
+  if (!sender.tab || typeof sender.tab.id === 'undefined') {
+    sendResponse({ enabled: false });
+    return;
+  }
+
   tabIds.add(sender.tab.id);
+  getCurrentExtensionState(function (enabled) {
+    sendResponse({ enabled: enabled });
+  });
+
+  return true;
 });
 
 chrome.tabs.onRemoved.addListener(function (tabId) {
