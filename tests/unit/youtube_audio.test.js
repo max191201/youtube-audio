@@ -10,6 +10,7 @@ describe('Content Script (youtube_audio.js)', () => {
   let extractJSONObjectAfterMarker;
   let getYouTubeVideoId;
   let selectAudioURLFromPlayerResponse;
+  let selectAudioURLForCurrentPage;
   let decipherSignature;
 
   beforeEach(() => {
@@ -223,6 +224,39 @@ describe('Content Script (youtube_audio.js)', () => {
 
       cipherAudioFormats.sort(sortAudioFormats);
       return Promise.resolve(getAudioFormatURL(cipherAudioFormats[0], operations));
+    };
+
+    const getPlayerResponseVideoId = function (playerResponse) {
+      const videoDetails = playerResponse && playerResponse.videoDetails;
+      return (videoDetails && videoDetails.videoId) || '';
+    };
+
+    const isPlayerResponseForCurrentPage = function (playerResponse, currentVideoId) {
+      const playerResponseVideoId = getPlayerResponseVideoId(playerResponse);
+
+      return !currentVideoId || !playerResponseVideoId || currentVideoId === playerResponseVideoId;
+    };
+
+    selectAudioURLForCurrentPage = function (
+      playerResponse,
+      currentVideoId,
+      androidPlayerResponse
+    ) {
+      const pagePlayerResponse = isPlayerResponseForCurrentPage(playerResponse, currentVideoId)
+        ? playerResponse
+        : null;
+
+      return selectAudioURLFromPlayerResponse(pagePlayerResponse).then(function (audioURL) {
+        if (audioURL) {
+          return audioURL;
+        }
+
+        if (!currentVideoId) {
+          return '';
+        }
+
+        return selectAudioURLFromPlayerResponse(androidPlayerResponse);
+      });
     };
 
     // Define the function as it is in youtube_audio.js
@@ -449,6 +483,41 @@ describe('Content Script (youtube_audio.js)', () => {
       await expect(selectAudioURLFromPlayerResponse(playerResponse)).resolves.toBe(
         'https://audio.example/videoplayback?itag=251&mime=audio%2Fwebm'
       );
+    });
+
+    it('should ignore stale player responses after YouTube navigation', async () => {
+      const stalePlayerResponse = {
+        videoDetails: {
+          videoId: 'first-video',
+        },
+        streamingData: {
+          adaptiveFormats: [
+            {
+              itag: 251,
+              mimeType: 'audio/webm',
+              url: 'https://audio.example/videoplayback?video=first&mime=audio%2Fwebm',
+            },
+          ],
+        },
+      };
+      const androidPlayerResponse = {
+        videoDetails: {
+          videoId: 'second-video',
+        },
+        streamingData: {
+          adaptiveFormats: [
+            {
+              itag: 251,
+              mimeType: 'audio/webm',
+              url: 'https://audio.example/videoplayback?video=second&mime=audio%2Fwebm',
+            },
+          ],
+        },
+      };
+
+      await expect(
+        selectAudioURLForCurrentPage(stalePlayerResponse, 'second-video', androidPlayerResponse)
+      ).resolves.toBe('https://audio.example/videoplayback?video=second&mime=audio%2Fwebm');
     });
 
     it('should decipher cipher-only audio formats when operations are available', async () => {

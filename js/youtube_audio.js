@@ -9,7 +9,7 @@ const ANDROID_CLIENT = {
 const VIDEO_RETRY_DELAY_MS = 250;
 const MAX_VIDEO_RETRY_ATTEMPTS = 12;
 const PLAYER_RESPONSE_RETRY_DELAY_MS = 500;
-const MAX_PLAYER_RESPONSE_RETRY_ATTEMPTS = 20;
+const MAX_PLAYER_RESPONSE_RETRY_ATTEMPTS = 80;
 const AUDIO_URL_GUARD_INTERVAL_MS = 500;
 const MAX_AUDIO_URL_GUARD_ATTEMPTS = 24;
 let isExtensionEnabled = false;
@@ -247,6 +247,18 @@ function isLivePlayerResponse(playerResponse) {
     (videoDetails && (videoDetails.isLive || videoDetails.isLiveContent)) ||
     (playabilityStatus && playabilityStatus.liveStreamability)
   );
+}
+
+function getPlayerResponseVideoId(playerResponse) {
+  var videoDetails = playerResponse && playerResponse.videoDetails;
+  return (videoDetails && videoDetails.videoId) || '';
+}
+
+function isPlayerResponseForCurrentPage(playerResponse) {
+  var currentVideoId = getYouTubeVideoId();
+  var playerResponseVideoId = getPlayerResponseVideoId(playerResponse);
+
+  return !currentVideoId || !playerResponseVideoId || currentVideoId === playerResponseVideoId;
 }
 
 function fetchAndroidPlayerResponse(videoId) {
@@ -726,24 +738,45 @@ function selectAudioURLFromPlayerResponse(playerResponse) {
 }
 
 function selectAudioURLForCurrentPage(playerResponse) {
-  return selectAudioURLFromPlayerResponse(playerResponse).then(function (audioURL) {
-    if (audioURL || isLivePlayerResponse(playerResponse)) {
+  var currentVideoId = getYouTubeVideoId();
+  var pagePlayerResponse = isPlayerResponseForCurrentPage(playerResponse) ? playerResponse : null;
+
+  return selectAudioURLFromPlayerResponse(pagePlayerResponse).then(function (audioURL) {
+    if (audioURL || isLivePlayerResponse(pagePlayerResponse)) {
       return audioURL;
     }
 
-    var videoId = getYouTubeVideoId();
-    if (!videoId) {
+    if (!currentVideoId) {
       return '';
     }
 
-    return fetchAndroidPlayerResponse(videoId).then(function (androidPlayerResponse) {
+    return fetchAndroidPlayerResponse(currentVideoId).then(function (androidPlayerResponse) {
       return selectAudioURLFromPlayerResponse(androidPlayerResponse);
     });
   });
 }
 
+function isYouTubeAdShowing() {
+  var moviePlayer = document.getElementById('movie_player');
+  if (moviePlayer && moviePlayer.classList.contains('ad-showing')) {
+    return true;
+  }
+
+  return !!document.querySelector('.html5-video-player.ad-showing');
+}
+
 function applyPlayerResponseAudio(attempt) {
   if (!isExtensionEnabled) {
+    return;
+  }
+
+  if (isYouTubeAdShowing()) {
+    resetAudioOnlyState();
+    if (attempt < MAX_PLAYER_RESPONSE_RETRY_ATTEMPTS) {
+      setTimeout(function () {
+        applyPlayerResponseAudio(attempt + 1);
+      }, PLAYER_RESPONSE_RETRY_DELAY_MS);
+    }
     return;
   }
 
@@ -766,7 +799,12 @@ document.addEventListener('yt-navigate-finish', function () {
   if (!isExtensionEnabled) {
     return;
   }
+  resetAudioOnlyState();
   applyPlayerResponseAudio(0);
+});
+
+document.addEventListener('yt-navigate-start', function () {
+  resetAudioOnlyState();
 });
 
 var makeSetAudioURL = function (videoElement, url) {
@@ -816,6 +854,12 @@ function startAudioURLGuard(url) {
   }, AUDIO_URL_GUARD_INTERVAL_MS);
 }
 
+function resetAudioOnlyState() {
+  activeAudioURL = '';
+  stopAudioURLGuard();
+  removeAudioOnlyNotifications();
+}
+
 function removeAudioOnlyNotifications() {
   let audioOnlyDivs = document.getElementsByClassName('audio_only_div');
   for (var i = audioOnlyDivs.length - 1; i >= 0; i--) {
@@ -859,9 +903,7 @@ function handleAudioMessage(request, attempt) {
   let url = request.url;
 
   if (url == '') {
-    activeAudioURL = '';
-    stopAudioURLGuard();
-    removeAudioOnlyNotifications();
+    resetAudioOnlyState();
     return;
   }
 
