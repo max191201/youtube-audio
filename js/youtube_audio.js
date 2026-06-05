@@ -10,10 +10,14 @@ const VIDEO_RETRY_DELAY_MS = 250;
 const MAX_VIDEO_RETRY_ATTEMPTS = 12;
 const PLAYER_RESPONSE_RETRY_DELAY_MS = 500;
 const MAX_PLAYER_RESPONSE_RETRY_ATTEMPTS = 20;
+const AUDIO_URL_GUARD_INTERVAL_MS = 500;
+const MAX_AUDIO_URL_GUARD_ATTEMPTS = 24;
 let isExtensionEnabled = false;
 let playerScriptURL = '';
 let signatureDecipherOperations = null;
 let playerScriptFetchPromise = null;
+let activeAudioURL = '';
+let audioURLGuardTimer = null;
 const androidPlayerResponsePromises = new Map();
 
 chrome.runtime.sendMessage(ENABLE_MESSAGE, function (response) {
@@ -786,6 +790,32 @@ function findVideoElement() {
   );
 }
 
+function stopAudioURLGuard() {
+  if (audioURLGuardTimer) {
+    clearInterval(audioURLGuardTimer);
+    audioURLGuardTimer = null;
+  }
+}
+
+function startAudioURLGuard(url) {
+  stopAudioURLGuard();
+
+  var attempts = 0;
+  audioURLGuardTimer = setInterval(function () {
+    attempts++;
+
+    if (!activeAudioURL || activeAudioURL !== url || attempts > MAX_AUDIO_URL_GUARD_ATTEMPTS) {
+      stopAudioURLGuard();
+      return;
+    }
+
+    var videoElement = findVideoElement();
+    if (videoElement && videoElement.src != url) {
+      makeSetAudioURL(videoElement, url);
+    }
+  }, AUDIO_URL_GUARD_INTERVAL_MS);
+}
+
 function removeAudioOnlyNotifications() {
   let audioOnlyDivs = document.getElementsByClassName('audio_only_div');
   for (var i = audioOnlyDivs.length - 1; i >= 0; i--) {
@@ -829,6 +859,8 @@ function handleAudioMessage(request, attempt) {
   let url = request.url;
 
   if (url == '') {
+    activeAudioURL = '';
+    stopAudioURLGuard();
     removeAudioOnlyNotifications();
     return;
   }
@@ -846,7 +878,9 @@ function handleAudioMessage(request, attempt) {
   videoElement.onloadeddata = function () {
     makeSetAudioURL(videoElement, url);
   };
+  activeAudioURL = url;
   makeSetAudioURL(videoElement, url);
+  startAudioURLGuard(url);
 
   let audioOnlyDivs = document.getElementsByClassName('audio_only_div');
   if (audioOnlyDivs.length == 0 && url.includes('mime=audio')) {

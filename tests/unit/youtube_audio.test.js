@@ -6,6 +6,7 @@
 describe('Content Script (youtube_audio.js)', () => {
   let makeSetAudioURL;
   let handleAudioMessage;
+  let stopAudioURLGuard;
   let extractJSONObjectAfterMarker;
   let getYouTubeVideoId;
   let selectAudioURLFromPlayerResponse;
@@ -18,6 +19,8 @@ describe('Content Script (youtube_audio.js)', () => {
 
     const audioUrlParametersToRemove = ['range', 'rn', 'rbuf', 'ump'];
     const audioItags = ['251', '140', '250', '249', '141', '139', '600', '599'];
+    let activeAudioURL = '';
+    let audioURLGuardTimer = null;
 
     getYouTubeVideoId = function (urlValue) {
       try {
@@ -240,6 +243,32 @@ describe('Content Script (youtube_audio.js)', () => {
       );
     };
 
+    stopAudioURLGuard = function () {
+      if (audioURLGuardTimer) {
+        clearInterval(audioURLGuardTimer);
+        audioURLGuardTimer = null;
+      }
+    };
+
+    const startAudioURLGuard = function (url) {
+      stopAudioURLGuard();
+
+      let attempts = 0;
+      audioURLGuardTimer = setInterval(function () {
+        attempts++;
+
+        if (!activeAudioURL || activeAudioURL !== url || attempts > 24) {
+          stopAudioURLGuard();
+          return;
+        }
+
+        const videoElement = findVideoElement();
+        if (videoElement && videoElement.src != url) {
+          makeSetAudioURL(videoElement, url);
+        }
+      }, 500);
+    };
+
     const removeAudioOnlyNotifications = function () {
       const audioOnlyDivs = document.getElementsByClassName('audio_only_div');
       for (let i = audioOnlyDivs.length - 1; i >= 0; i--) {
@@ -279,6 +308,8 @@ describe('Content Script (youtube_audio.js)', () => {
       const url = request.url;
 
       if (url == '') {
+        activeAudioURL = '';
+        stopAudioURLGuard();
         removeAudioOnlyNotifications();
         return;
       }
@@ -296,13 +327,22 @@ describe('Content Script (youtube_audio.js)', () => {
       videoElement.onloadeddata = function () {
         makeSetAudioURL(videoElement, url);
       };
+      activeAudioURL = url;
       makeSetAudioURL(videoElement, url);
+      startAudioURLGuard(url);
 
       const audioOnlyDivs = document.getElementsByClassName('audio_only_div');
       if (audioOnlyDivs.length == 0 && url.includes('mime=audio')) {
         appendAudioOnlyNotification(videoElement);
       }
     };
+  });
+
+  afterEach(() => {
+    if (stopAudioURLGuard) {
+      stopAudioURLGuard();
+    }
+    jest.useRealTimers();
   });
 
   describe('makeSetAudioURL', () => {
@@ -538,6 +578,19 @@ describe('Content Script (youtube_audio.js)', () => {
       handleAudioMessage({ url: '' });
 
       expect(document.getElementsByClassName('audio_only_div')).toHaveLength(0);
+    });
+
+    it('should reapply audio URL if YouTube replaces the video source', () => {
+      jest.useFakeTimers();
+      const video = document.querySelector('video');
+      const audioURL = 'https://youtube.com/videoplayback?mime=audio';
+
+      handleAudioMessage({ url: audioURL });
+      video.src = 'https://youtube.com/videoplayback?mime=video';
+
+      jest.advanceTimersByTime(500);
+
+      expect(video.src).toContain('mime=audio');
     });
   });
 
